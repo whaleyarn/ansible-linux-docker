@@ -1,0 +1,98 @@
+---
+- name: Ensure apt keyrings directory exists.
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Copy Docker apt key.
+  ansible.builtin.copy:
+    src: docker.asc
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Config debian.sources
+  ansible.builtin.deb822_repository:
+    name: debian
+    uris: "{{ docker_apt_mirrors[docker_apt_mirror_region] }}"
+    suites:
+      - '{{ ansible_facts["distribution_release"] }}'
+    components:
+      - stable
+    signed_by: '/etc/apt/keyrings/docker.asc'
+    state: present
+
+- name: 'Install docker'
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+      - python3-pip
+    state: present
+    update_cache: true
+
+- name: 'Install python docker'
+  ansible.builtin.pip:
+    name:
+      - docker
+    state: present
+    extra_args: '{{ "--break-system-packages" if ansible_facts["python_version"] is version("3.11", ">=") else "" }}'
+
+- name: Create daemon.json
+  ansible.builtin.template:
+    src: 'docker/daemon.json'
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  notify: 'Restart docker service'
+  when: docker_registry_mirror_enabled
+
+- name: 'Download docker completion file'
+  ansible.builtin.get_url:
+    url: https://raw.githubusercontent.com/docker/cli/master/contrib/completion/bash/docker
+    dest: /etc/bash_completion.d/docker
+    mode: '0644'
+
+- name: 'Docker group add {{ item }}'
+  ansible.builtin.user:
+    name: '{{ item }}'
+    groups: docker
+    append: true
+    state: present
+  when: shell_user is defined and shell_user != ""
+  loop: '{{ (shell_user if shell_user is sequence and shell_user is not string else [shell_user]) }}'
+
+- name: Config docker service proxy
+  block:
+  - name: Create Docker systemd drop-in directory.
+    ansible.builtin.file:
+      path: /etc/systemd/system/docker.service.d
+      state: directory
+      owner: root
+      group: root
+      mode: "0755"
+
+  - name: Configure Docker service proxy.
+    ansible.builtin.template:
+      src: 'etc/systemd/system/docker.service.d/10-proxy.conf'
+      dest: /etc/systemd/system/docker.service.d/10-proxy.conf
+      owner: root
+      group: root
+      mode: "0644"
+    notify:
+      - Restart docker service
+  when:
+    - docker_proxy_env.http_proxy is defined
+    - docker_proxy_env.http_proxy != ""
+
+- name: Remove proxy config for docker
+  ansible.builtin.file:
+    dest: /etc/systemd/system/docker.service.d/10-proxy.conf
+    state: absent
+  when:
+    - not docker_proxy_env
